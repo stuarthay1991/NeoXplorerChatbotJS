@@ -1,0 +1,221 @@
+/* Ported from former MUI makeStyles; spacing(n) used 8px steps like MUI default. */
+
+.mainpane {
+  box-sizing: border-box;
+  height: 85px;
+  min-height: 85px;
+  max-height: 85px;
+  padding-top: 4px;
+  padding-bottom: 4px;
+  flex-grow: 0;
+  flex-shrink: 0;
+}
+
+.mainpane_margin_type1 {
+  margin-left: 30px;
+  margin-right: 75px;
+  height: 50%;
+}
+
+.mainpane_margin_type2 {
+  margin-left: 20px;
+  margin-right: 35px;
+  background-color: #e8e8e8;
+  height: 50%;
+  border-radius: 20px;
+}
+
+.myButton {
+  background-color: #efad18;
+  border-radius: 8px;
+  display: inline-block;
+  cursor: pointer;
+  color: #ffffff;
+  font-family: Roboto, sans-serif;
+  font-size: 16px;
+  font-weight: bold;
+  padding: 13px 32px;
+  text-decoration: none;
+  text-shadow: 0 1px 0 #3d768a;
+}
+
+.viewpane {
+  flex-grow: 1;
+  background-color: white;
+  border: 1px solid #ccc;
+}
+
+.flexparent {
+  display: flex;
+}
+
+.flexchild {
+  flex: 1;
+}
+
+.wid200 {
+  width: 200px;
+}
+
+.heatmap {
+  margin: 3px;
+}
+
+.cntr_generic {
+  font-size: 20px;
+  text-align: right;
+}
+
+.cntr_viewpane {
+  font-size: 14px;
+  font-weight: bold;
+  text-align: center;
+}
+
+.filteritem_viewpane {
+  font-size: 16px;
+  margin: 8px;
+  font-weight: bold;
+  text-align: left;
+}
+
+.cntr_btn {
+  font-size: 40px;
+  font-weight: bold;
+  text-align: center;
+}
+
+.cntr_special {
+  font-size: 25px;
+  font-weight: bold;
+  text-align: left;
+}
+
+.hidden_panel {
+  display: none;
+}
+
+.root {
+  flex-grow: 1;
+}
+
+.tabholder {
+  margin-left: 100px;
+  margin-right: 100px;
+}
+
+.mpcontent {
+  margin-left: 50px;
+  margin-right: 100px;
+}
+
+.smallpadding {
+  padding: 4px;
+}
+
+.padding {
+  padding: 16px;
+}
+
+.medpadding {
+  padding: 48px;
+}
+
+.heavypadding {
+  padding: 88px;
+}
+
+.fullempty {
+  padding: 320px;
+}
+
+.demo1 {
+  background-color: #fff;
+}
+
+.demo2 {
+  background-color: #edf0f5;
+}
+
+.baseinput {
+  padding: 2px 4px;
+  display: flex;
+  align-items: center;
+  width: 400px;
+}
+
+.basicbutton {
+  font-family: Roboto, sans-serif;
+}
+
+.secondaryinput {
+  padding: 2px 4px;
+  display: flex;
+  align-items: center;
+  width: 275px;
+}
+
+.input {
+  margin-left: 8px;
+  flex: 1;
+}
+
+.iconButton {
+  padding: 10px;
+}
+
+.iconSearch {
+  padding: 10px;
+  color: white;
+  background-color: #0f6a8b;
+}
+
+.divider {
+  height: 28px;
+  margin: 4px;
+}
+
+.formControl {
+  min-width: 120px;
+}
+
+.selectEmpty {
+  margin-top: 16px;
+}
+
+.formControl2 {
+  min-width: 360px;
+  font-size: 16px;
+}
+
+.splash_table {
+  border-collapse: collapse;
+  width: 100%;
+}
+
+.splash_tr {
+  border: 2px solid black;
+  text-align: left;
+  background-color: white;
+  padding: 8px;
+}
+
+.splash_tr_odd {
+  border: 2px solid black;
+  text-align: left;
+  background-color: #ddd;
+  padding: 8px;
+}
+
+.splash_td {
+  border: 2px solid black;
+  text-align: center;
+  padding: 8px;
+}
+
+.splash_th {
+  border: 2px solid black;
+  text-align: center;
+  font-size: 14px;
+  padding: 8px;
+}
