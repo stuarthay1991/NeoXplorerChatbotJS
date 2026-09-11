@@ -1,19 +1,7 @@
-const fs = require("fs/promises");
-const path = require("path");
 const { dbCredentials } = require("../config/neoxdb.config.js");
 const { executeOperator } = require("./operators.js");
 const { tool, zodSchema } = require("ai");
 const { z } = require("zod");
-
-const MAX_SKILL_FILE_BYTES = 600_000;
-
-/** Same `name` as operators.js so catches match validation errors from either module. */
-class SkillPathError extends Error {
-  constructor(message) {
-    super(message);
-    this.name = "UnsafeInputError";
-  }
-}
 
 function isUnsafeInputError(err) {
   return err != null && err.name === "UnsafeInputError";
@@ -667,103 +655,6 @@ const executeSql = tool({
   execute: executeSqlExecute,
 });
 
-function _skillsRootFromContext(experimentalContext) {
-  const skills = experimentalContext?.skills;
-  if (!Array.isArray(skills)) {
-    return null;
-  }
-  const first = skills.find((s) => typeof s === "string" && s.length > 0);
-  return first ?? null;
-}
-
-function _defaultSkillsRoot() {
-  return path.join(__dirname, "..", "skills");
-}
-
-function _resolveSkillPath(skillsRootAbs, relativePath) {
-  const raw = String(relativePath ?? "").trim();
-  if (!raw) {
-    throw new SkillPathError("relative_path is required.");
-  }
-  if (raw.includes("\0")) {
-    throw new SkillPathError("Invalid path.");
-  }
-  const root = path.resolve(skillsRootAbs);
-  const joined = path.resolve(root, raw);
-  const rel = path.relative(root, joined);
-  if (rel.startsWith("..") || path.isAbsolute(rel)) {
-    throw new SkillPathError("Path must stay under the skills directory.");
-  }
-  return joined;
-}
-
-const readSkillDescription = [
-  "Read ONE file under the agent skills directory (markdown SKILL files and helpers).",
-  "Pass relative_path like \"schema-per-cancer/SKILL.md\" or \"sql-authoring/SKILL.md\".",
-  "Paths cannot escape the skills folder (no '..'). Large files are rejected.",
-  "Repeated reads of the same file in one chat request are served from an in-memory cache (readSkillCache on experimental_context).",
-].join(" ");
-
-const readSkillInputSchema = z.object({
-  relative_path: z
-    .string()
-    .describe(
-      'File path under skills/, e.g. "schema-per-cancer/SKILL.md".',
-    ),
-});
-
-async function readSkillExecute(input, options) {
-  const { relative_path: relativePath } = input;
-  const ctx = options.experimental_context ?? {};
-  const skillsRoot =
-    _skillsRootFromContext(ctx) ?? _defaultSkillsRoot();
-
-  let resolved;
-  try {
-    resolved = _resolveSkillPath(skillsRoot, relativePath);
-  } catch (e) {
-    if (isUnsafeInputError(e)) {
-      return _err(e.message);
-    }
-    throw e;
-  }
-
-  const cache = ctx.readSkillCache;
-  const cacheKey = resolved;
-  if (cache instanceof Map && cache.has(cacheKey)) {
-    const cached = cache.get(cacheKey);
-    return `path: ${resolved}\nsource: cache\n\n${cached}`;
-  }
-
-  try {
-    const stat = await fs.stat(resolved);
-    if (!stat.isFile()) {
-      return _err(`Not a file: ${relativePath}`);
-    }
-    if (stat.size > MAX_SKILL_FILE_BYTES) {
-      return _err(
-        `File too large (${stat.size} bytes); max ${MAX_SKILL_FILE_BYTES}.`,
-      );
-    }
-    const content = await fs.readFile(resolved, "utf8");
-    if (cache instanceof Map) {
-      cache.set(cacheKey, content);
-    }
-    return `path: ${resolved}\nsource: disk\n\n${content}`;
-  } catch (e) {
-    if (e && e.code === "ENOENT") {
-      return _err(`No such file: ${relativePath}`);
-    }
-    return _err(`read_skill: ${e?.message ?? e}`);
-  }
-}
-
-const readSkill = tool({
-  description: readSkillDescription,
-  inputSchema: zodSchema(readSkillInputSchema),
-  execute: readSkillExecute,
-});
-
 const { tool: langchainTool } = require("@langchain/core/tools");
 
 /**
@@ -848,7 +739,6 @@ const PRIMARY_TOOLS = Object.freeze([
   rank,
   searchAnnotations,
   executeSql,
-  readSkill,
 ]);
 
 /** `streamText({ tools })` expects a `Record<name, Tool>` — not the array above. */
@@ -862,7 +752,6 @@ const primaryTools = Object.freeze({
   rank,
   search_annotations: searchAnnotations,
   execute_sql: executeSql,
-  read_skill: readSkill,
 });
 
 function createPrimaryTools() {
@@ -889,6 +778,5 @@ module.exports = {
   querySample,
   querySignature,
   rank,
-  readSkill,
   searchAnnotations,
 };

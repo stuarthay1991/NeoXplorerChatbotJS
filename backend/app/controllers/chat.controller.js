@@ -1,120 +1,19 @@
 const fs = require("fs/promises");
 const path = require("path");
-const { createUIMessageStream, pipeUIMessageStreamToResponse, streamText, convertToModelMessages } = require("ai");
-const { openai } = require("@ai-sdk/openai");
-const { HumanMessage, AIMessage } = require("@langchain/core/messages");
-const { dbCredentials } = require("../config/neoxdb.config.js");
+const { createUIMessageStream, pipeUIMessageStreamToResponse } = require("ai");
+const { HumanMessage, AIMessage, isAIMessageChunk } = require("@langchain/core/messages");
 const { MemorySaver } = require("@langchain/langgraph-checkpoint");
-const {
-  createLangChainOncoTools,
-} = require("../tools/primarytools.js");
-const { createDeepAgent } = require("deepagents");
+const { createLangChainOncoTools } = require("../tools/primarytools.js");
+const { createDeepAgent, FilesystemBackend } = require("deepagents");
 const { ChatOpenAI } = require("@langchain/openai");
 
 const MAX_AGENTS_MD_BYTES = 96_000;
 
-/** Shared in-process checkpointer; separate conversations via `configurable.thread_id`. */
-const checkpointer = new MemorySaver();
+const APP_ROOT = path.join(__dirname, "..");
+const AGENTS_MD_PATH = path.join(APP_ROOT, "AGENTS.md");
+const SKILLS_DIR = path.join(APP_ROOT, "skills");
 
-/**
- * LangChain-style "project memory": static instructions file appended to system
- * each request (matches AGENTS.md header: injected every turn).
- */
-async function loadAgentsMdBlock(agentsMdPath) {
-  try {
-    const stat = await fs.stat(agentsMdPath);
-    if (!stat.isFile()) {
-      return "";
-    }
-    if (stat.size > MAX_AGENTS_MD_BYTES) {
-      const text = await fs.readFile(agentsMdPath, "utf8");
-      return `\n\n--- AGENTS.md (project memory, truncated) ---\n${text.slice(0, MAX_AGENTS_MD_BYTES)}\n…`;
-    }
-    const text = await fs.readFile(agentsMdPath, "utf8");
-    return `\n\n--- AGENTS.md (project memory) ---\n${text}`;
-  } catch (e) {
-    if (e && e.code === "ENOENT") {
-      return "";
-    }
-    console.warn("AGENTS.md:", e.message);
-    return "";
-  }
-}
-
-/** UIMessage from @ai-sdk/react uses `parts`; legacy uses `content`. */
-function textFromClientMessage(m) {
-  if (m == null) {
-    return "";
-  }
-  if (typeof m.content === "string" && m.content.length > 0) {
-    return m.content;
-  }
-  if (Array.isArray(m.parts)) {
-    return m.parts
-      .filter((p) => p && p.type === "text")
-      .map((p) => p.text ?? "")
-      .join("");
-  }
-  return "";
-}
-
-function clientUiMessagesToLangChain(messages) {
-  const out = [];
-  for (const m of messages) {
-    if (!m || typeof m.role !== "string") {
-      continue;
-    }
-    const text = textFromClientMessage(m);
-    if (m.role === "user" && text.length > 0) {
-      out.push(new HumanMessage(text));
-    } else if (m.role === "assistant" && text.length > 0) {
-      out.push(new AIMessage(text));
-    }
-  }
-  return out;
-}
-
-function stringifyLangChainMessageContent(msg) {
-  const c = msg?.content;
-  if (c == null) {
-    return "";
-  }
-  if (typeof c === "string") {
-    return c;
-  }
-  if (Array.isArray(c)) {
-    return c
-      .map((block) => {
-        if (typeof block === "string") {
-          return block;
-        }
-        if (block && typeof block === "object" && block.type === "text") {
-          return block.text ?? "";
-        }
-        return "";
-      })
-      .join("");
-  }
-  return String(c);
-}
-
-async function chatPost(req, res) {
-  if (!process.env.OPENAI_API_KEY) {
-    return res.status(500).json({
-      error: "Set OPENAI_API_KEY in backend/.env (or your shell) before starting the server.",
-    });
-  }
-
-  const messages = req.body?.messages;
-  if (!Array.isArray(messages)) {
-    return res.status(400).json({ error: "Expected JSON body with a messages array." });
-  }
-
-  try {
-    const agentsMdPath = path.join(__dirname, "..", "AGENTS.md");
-    const skillsDir = path.join(__dirname, "..", "skills");
-
-    var systemPrompt = `You are OncoSplice Agent — an expert in cancer alternative splicing
+const SYSTEM_PROMPT = `You are OncoSplice Agent — an expert in cancer alternative splicing
 genomics built on TCGA and GTEx data.
 
 AVAILABLE COHORTS (24 TCGA cancers + GTEx normal reference):
@@ -187,41 +86,273 @@ DO NOT
 - Invent data — only report what the tools return.
 - Call per-cohort operators with cancer='kirp'.
 - Retry a failed 'execute_sql' without changing it based on the error.
-`
+`;
 
-    //const agentsMdBlock = await loadAgentsMdBlock(agentsMdPath);
-    // createDeepAgent expects a LangChain BaseChatModel (e.g. ChatOpenAI), not @ai-sdk/openai.
-    const lcModel = new ChatOpenAI({
-      model: process.env.OPENAI_CHAT_MODEL || "gpt-4.1",
-      streaming: true,
-    });
-    const agent = createDeepAgent({
-      model: lcModel,
-      // Pass your existing system prompt
-      systemPrompt: systemPrompt, 
-      // backend/app/skills and backend/app/AGENTS.md (same as skillsDir / agentsMdPath)
-      skills: [skillsDir],
-      memory: [agentsMdPath],
-      //backend: backend,
-      tools: createLangChainOncoTools(),
-      checkpointer,
-    });
+/** Shared in-process checkpointer; separate conversations via `configurable.thread_id`. */
+const checkpointer = new MemorySaver();
 
+const DEFAULT_OPENAI_BASE_URL = "http://localhost:4000/v1";
+
+/** OpenAI-compatible API base URL (override with OPENAI_BASE_URL in .env). */
+function getOpenAiClientConfiguration() {
+  const baseURL =
+    typeof process.env.OPENAI_BASE_URL === "string" &&
+    process.env.OPENAI_BASE_URL.trim() !== ""
+      ? process.env.OPENAI_BASE_URL.trim()
+      : DEFAULT_OPENAI_BASE_URL;
+  return { baseURL };
+}
+
+/** Reuse one agent graph per process (skills, tools, model wired once). */
+let _agent;
+
+/*from openai import OpenAI
+client = OpenAI(base_url="http://<endpoint>/v1", api_key="z11U2fksU8JDhq6bstyedk4Hw7eQRGcn")
+client.chat.completions.create(model="gpt-oss-120b", messages=[{"role":"user","content":"hi"}])*/
+
+function createOncoAgent() {
+  const lcModel = new ChatOpenAI({
+    model: process.env.OPENAI_CHAT_MODEL || "nemotron-3-super",
+    streaming: true,
+    configuration: getOpenAiClientConfiguration(),
+  });
+  const backend = new FilesystemBackend({
+    rootDir: APP_ROOT,
+    virtualMode: false,
+    maxFileSizeMb: 12,
+  });
+  const skillsPath = SKILLS_DIR.endsWith(path.sep)
+    ? SKILLS_DIR
+    : `${SKILLS_DIR}${path.sep}`;
+
+  return createDeepAgent({
+    model: lcModel,
+    systemPrompt: SYSTEM_PROMPT,
+    skills: [skillsPath],
+    memory: [AGENTS_MD_PATH],
+    backend,
+    tools: createLangChainOncoTools(),
+    checkpointer,
+  });
+}
+
+function getOncoAgent() {
+  if (_agent == null) {
+    _agent = createOncoAgent();
+  }
+  return _agent;
+}
+
+function openAiKeyMissingResponse(res) {
+  return res.status(500).json({
+    error:
+      "Set OPENAI_API_KEY in backend/.env (or your shell) before starting the server.",
+  });
+}
+
+function parseThreadId(body) {
+  const raw = body?.threadId;
+  if (typeof raw === "string" && raw.trim() !== "") {
+    return raw.trim();
+  }
+  return "default";
+}
+
+/**
+ * LangChain-style "project memory": static instructions file appended to system
+ * each request (matches AGENTS.md header: injected every turn).
+ */
+async function loadAgentsMdBlock(agentsMdPath) {
+  try {
+    const stat = await fs.stat(agentsMdPath);
+    if (!stat.isFile()) {
+      return "";
+    }
+    if (stat.size > MAX_AGENTS_MD_BYTES) {
+      const text = await fs.readFile(agentsMdPath, "utf8");
+      return `\n\n--- AGENTS.md (project memory, truncated) ---\n${text.slice(0, MAX_AGENTS_MD_BYTES)}\n…`;
+    }
+    const text = await fs.readFile(agentsMdPath, "utf8");
+    return `\n\n--- AGENTS.md (project memory) ---\n${text}`;
+  } catch (e) {
+    if (e && e.code === "ENOENT") {
+      return "";
+    }
+    console.warn("AGENTS.md:", e.message);
+    return "";
+  }
+}
+
+/** UIMessage from @ai-sdk/react uses `parts`; legacy uses `content`. */
+function textFromClientMessage(m) {
+  if (m == null) {
+    return "";
+  }
+  if (typeof m.content === "string" && m.content.length > 0) {
+    return m.content;
+  }
+  if (Array.isArray(m.parts)) {
+    return m.parts
+      .filter((p) => p && p.type === "text")
+      .map((p) => p.text ?? "")
+      .join("");
+  }
+  return "";
+}
+
+function clientUiMessagesToLangChain(messages) {
+  const out = [];
+  for (const m of messages) {
+    if (!m || typeof m.role !== "string") {
+      continue;
+    }
+    const text = textFromClientMessage(m);
+    if (m.role === "user" && text.length > 0) {
+      out.push(new HumanMessage(text));
+    } else if (m.role === "assistant" && text.length > 0) {
+      out.push(new AIMessage(text));
+    }
+  }
+  return out;
+}
+
+/*function setupChatVerificationAndMessageLog(arg1, arg2) {
+  //Log every message sent to the LLM. Categorize the messages as one of several predetermined categories
+}*/
+
+/** Simple { role, content }[] for external JSON clients (no UI `parts`). */
+function simpleMessagesToLangChain(messages) {
+  const out = [];
+  for (const m of messages) {
+    if (!m || typeof m.role !== "string") {
+      continue;
+    }
+    const text =
+      typeof m.content === "string"
+        ? m.content.trim()
+        : textFromClientMessage(m);
+    if (text.length === 0) {
+      continue;
+    }
+    if (m.role === "user") {
+      out.push(new HumanMessage(text));
+    } else if (m.role === "assistant") {
+      out.push(new AIMessage(text));
+    }
+  }
+  return out;
+}
+
+function stringifyLangChainMessageContent(msg) {
+  const c = msg?.content;
+  if (c == null) {
+    return "";
+  }
+  if (typeof c === "string") {
+    return c;
+  }
+  if (Array.isArray(c)) {
+    return c
+      .map((block) => {
+        if (typeof block === "string") {
+          return block;
+        }
+        if (block && typeof block === "object" && block.type === "text") {
+          return block.text ?? "";
+        }
+        return "";
+      })
+      .join("");
+  }
+  return String(c);
+}
+
+function logReceivedPrompt(route, threadId, lcMessages) {
+  const text = lcMessages
+    .map((m) => stringifyLangChainMessageContent(m))
+    .filter((t) => t.length > 0)
+    .join("\n---\n");
+  console.log(`[${route}] threadId=${threadId} prompt:\n${text}`);
+}
+
+/**
+ * Run the deep agent and collect the full assistant text from message chunks.
+ */
+async function collectAgentReply(lcMessages, threadId) {
+  const agent = getOncoAgent();
+  const graphStreamConfig = {
+    configurable: { thread_id: threadId },
+    streamMode: "messages",
+  };
+  const parts = [];
+  const lgStream = await agent.stream({ messages: lcMessages }, graphStreamConfig);
+  for await (const chunk of lgStream) {
+    const msg = Array.isArray(chunk) ? chunk[0] : chunk;
+    if (!isAIMessageChunk(msg)) {
+      continue;
+    }
+    const delta = stringifyLangChainMessageContent(msg);
+    if (delta.length > 0) {
+      parts.push(delta);
+    }
+  }
+  return parts.join("");
+}
+
+/**
+ * Normalize external API body into LangChain messages.
+ * Accepts: { message }, { messages: [{role, content}] }, or UI-style { messages: [{role, parts}] }.
+ */
+function parseExternalChatInput(body) {
+  if (typeof body?.message === "string" && body.message.trim() !== "") {
+    return {
+      lcMessages: [new HumanMessage(body.message.trim())],
+      error: null,
+    };
+  }
+  if (Array.isArray(body?.messages) && body.messages.length > 0) {
+    const lcFromUi = clientUiMessagesToLangChain(body.messages);
+    if (lcFromUi.length > 0) {
+      return { lcMessages: lcFromUi, error: null };
+    }
+    const lcFromSimple = simpleMessagesToLangChain(body.messages);
+    if (lcFromSimple.length > 0) {
+      return { lcMessages: lcFromSimple, error: null };
+    }
+    return {
+      lcMessages: null,
+      error: "Each message needs non-empty user/assistant text (content or parts).",
+    };
+  }
+  return {
+    lcMessages: null,
+    error:
+      'Expected JSON body with "message" (string) or "messages" (array).',
+  };
+}
+
+/** React UI: SSE UI-message stream (useChat + DefaultChatTransport). */
+async function chatPost(req, res) {
+  if (!process.env.OPENAI_API_KEY) {
+    return openAiKeyMissingResponse(res);
+  }
+
+  const messages = req.body?.messages;
+  if (!Array.isArray(messages)) {
+    return res.status(400).json({ error: "Expected JSON body with a messages array." });
+  }
+
+  try {
+    const agent = getOncoAgent();
     const lcMessages = clientUiMessagesToLangChain(messages);
-    const threadId =
-      typeof req.body?.threadId === "string" && req.body.threadId.trim() !== ""
-        ? req.body.threadId.trim()
-        : "default";
-    const result = await agent.invoke(
-      { messages: lcMessages },
-      { configurable: { thread_id: threadId } },
-    );
+    const threadId = parseThreadId(req.body);
+    logReceivedPrompt("chatPost", threadId, lcMessages);
 
-    const lcOut = result.messages ?? [];
-    const lastLc = lcOut[lcOut.length - 1];
-    const replyText = stringifyLangChainMessageContent(lastLc);
+    const graphStreamConfig = {
+      configurable: { thread_id: threadId },
+      streamMode: "messages",
+    };
 
-    // useChat + DefaultChatTransport expect a UI message SSE stream (not JSON body).
     const stream = createUIMessageStream({
       originalMessages: messages,
       execute: async ({ writer }) => {
@@ -229,44 +360,39 @@ DO NOT
         writer.write({ type: "start-step" });
         const textId = "text-1";
         writer.write({ type: "text-start", id: textId });
-        writer.write({ type: "text-delta", id: textId, delta: replyText });
+        try {
+          const lgStream = await agent.stream(
+            { messages: lcMessages },
+            graphStreamConfig,
+          );
+          for await (const chunk of lgStream) {
+            const msg = Array.isArray(chunk) ? chunk[0] : chunk;
+            if (!isAIMessageChunk(msg)) {
+              continue;
+            }
+            const delta = stringifyLangChainMessageContent(msg);
+            if (delta.length > 0) {
+              writer.write({ type: "text-delta", id: textId, delta });
+            }
+          }
+        } catch (streamErr) {
+          console.error(streamErr);
+          const fallback =
+            streamErr && typeof streamErr.message === "string"
+              ? streamErr.message
+              : String(streamErr);
+          writer.write({
+            type: "text-delta",
+            id: textId,
+            delta: `\n\n[Error] ${fallback}`,
+          });
+        }
         writer.write({ type: "text-end", id: textId });
         writer.write({ type: "finish-step" });
         writer.write({ type: "finish" });
       },
     });
     pipeUIMessageStreamToResponse({ response: res, stream });
-    return;
-
-    /*const modelMessages = await convertToModelMessages(messages);
-    const result = streamText({
-      model: openai("gpt-4.1"),
-      system: systemPrompt,
-      messages: modelMessages,
-      tools: {
-        query_gene: queryGene,
-        query_signature: querySignature,
-        query_event: queryEvent,
-        query_sample: querySample,
-        count,
-        list_entities: listEntities,
-        rank,
-        search_annotations: searchAnnotations,
-        execute_sql: executeSql,
-        read_skill: readSkill,
-      },
-      experimental_context: {
-        db: dbCredentials,
-        memory: [agentsMdPath],
-        agentsMdPath,
-        skills: [skillsDir],
-        readSkillCache: new Map(),
-      },
-    });
-
-    result.pipeUIMessageStreamToResponse(res, {
-      originalMessages: messages,
-    });*/
   } catch (err) {
     console.error(err);
     if (!res.headersSent) {
@@ -275,4 +401,37 @@ DO NOT
   }
 }
 
-module.exports = { chatPost };
+/**
+ * External LLM / service clients: JSON request/response (no AI SDK SSE).
+ *
+ * POST /api/chat/complete
+ * Body: { message: "...", threadId?: "..." }
+ *    or { messages: [{ role, content }], threadId?: "..." }
+ * Response: { reply: "...", threadId: "..." }
+ */
+async function chatCompletePost(req, res) {
+  if (!process.env.OPENAI_API_KEY) {
+    return openAiKeyMissingResponse(res);
+  }
+
+  const { lcMessages, error } = parseExternalChatInput(req.body);
+  if (error) {
+    return res.status(400).json({ error });
+  }
+
+  const threadId = parseThreadId(req.body);
+  logReceivedPrompt("chatCompletePost", threadId, lcMessages);
+
+  try {
+    const reply = await collectAgentReply(lcMessages, threadId);
+    return res.json({ reply, threadId });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({
+      error: err.message || "Chat request failed.",
+      threadId,
+    });
+  }
+}
+
+module.exports = { chatPost, chatCompletePost };

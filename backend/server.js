@@ -5,12 +5,18 @@ const bodyParser = require("body-parser");
 const app = express();
 const cors = require("cors");
 
+const defaultCorsOrigins = [
+  "http://localhost:5173",
+  "http://localhost:8087",
+  "http://127.0.0.1:5173",
+];
+const extraCorsOrigins = (process.env.CORS_ORIGINS || "")
+  .split(",")
+  .map((s) => s.trim())
+  .filter(Boolean);
+
 var corsOptions = {
-  origin: [
-    "http://localhost:5173",
-    "http://localhost:8085",
-    "http://127.0.0.1:5173",
-  ],
+  origin: [...defaultCorsOrigins, ...extraCorsOrigins],
 };
 
 app.use(cors(corsOptions));
@@ -34,7 +40,7 @@ app.get("/", (req, res) => {
 
 require("./app/routes/chat.routes.js")(app);
 
-const PORT = process.env.PORT || 8085;
+const PORT = process.env.PORT || 8087;
 app.listen(PORT, () => {
   console.log(`Server is running on port ${PORT}.`);
 });
